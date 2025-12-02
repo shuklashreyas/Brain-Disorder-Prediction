@@ -1,38 +1,77 @@
+
+import os
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["TF_NUM_INTEROP_THREADS"] = "1"
+os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
+os.environ["KMP_INIT_AT_FORK"] = "FALSE"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_METAL_ENABLED"] = "0"
+
+
+import cv2
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
-from tensorflow.keras.preprocessing import image_dataset_from_directory
+from sklearn.model_selection import train_test_split
 
-IMG_SIZE = (150, 150)
-BATCH = 32
-DATA_PATH = "data/CombinedDataset"
+try:
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        tf.config.set_visible_devices([], 'GPU')
+except:
+    pass
 
+try:
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+except:
+    pass
 
-train_ds = image_dataset_from_directory(
-    f"{DATA_PATH}/train",
-    image_size=IMG_SIZE,
-    batch_size=BATCH,
-    label_mode='int'
-)
+IMG_SIZE = 150
+DATA_PATH = "data/CombinedDataset/train"
+ALLOWED_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
 
-test_ds = image_dataset_from_directory(
-    f"{DATA_PATH}/test",
-    image_size=IMG_SIZE,
-    batch_size=BATCH,
-    label_mode='int'
-)
+def load_data_manual(path):
+    X, y = [], []
+    class_names = sorted(os.listdir(path))
+    print("Classes:", class_names)
 
+    for label, cls in enumerate(class_names):
+        cls_path = os.path.join(path, cls)
+        for img_name in os.listdir(cls_path):
+
+            img_path = os.path.join(cls_path, img_name)
+
+            if not os.path.isfile(img_path):
+                continue
+
+            if not img_name.lower().endswith(ALLOWED_EXTENSIONS):
+                continue
+
+            img = cv2.imread(img_path)
+            if img is None:
+                continue
+
+            img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+            img = img.astype("float32") / 255.0
+
+            X.append(img)
+            y.append(label)
+
+    return np.array(X), np.array(y), class_names
 
 data_aug = tf.keras.Sequential([
     layers.RandomFlip("horizontal"),
     layers.RandomRotation(0.1),
     layers.RandomZoom(0.1),
+    layers.RandomBrightness(0.1),
     layers.RandomContrast(0.1),
-    layers.RandomBrightness(0.1)
 ])
 
 
 def build_extensive_cnn(num_classes):
-    inputs = layers.Input(shape=(*IMG_SIZE, 3))
+    inputs = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
     x = data_aug(inputs)
 
     # Block 1
@@ -63,7 +102,7 @@ def build_extensive_cnn(num_classes):
     x = layers.BatchNormalization()(x)
     x = layers.MaxPooling2D()(x)
 
-    # Dense head
+    # Dense Head
     x = layers.Flatten()(x)
     x = layers.Dense(512, activation='relu')(x)
     x = layers.Dropout(0.5)(x)
@@ -71,25 +110,47 @@ def build_extensive_cnn(num_classes):
     x = layers.Dropout(0.3)(x)
 
     outputs = layers.Dense(num_classes, activation='softmax')(x)
-
     return models.Model(inputs, outputs)
 
+# --------------------------------------------------------------
+# MAIN TRAINING LOOP
+# --------------------------------------------------------------
+def main():
+    print("Loading dataset manually...")
+    X, y, class_names = load_data_manual(DATA_PATH)
+    print("Loaded:", X.shape, y.shape)
 
-num_classes = len(train_ds.class_names)
-model = build_extensive_cnn(num_classes)
+    # Train/Validation Split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, shuffle=True, stratify=y
+    )
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(1e-4),
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy']
-)
+    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train)).batch(16)
+    test_ds = tf.data.Dataset.from_tensor_slices((X_test, y_test)).batch(16)
 
-model.summary()
+    print(f"Building model with {len(class_names)} classes")
+    model = build_extensive_cnn(len(class_names))
 
-history = model.fit(
-    train_ds,
-    validation_data=test_ds,
-    epochs=40  
-)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-4),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
 
-model.save("results/extensive_cnn_model.h5")
+    print("Model compiled.")
+    model.summary()
+
+    print("\nStarting CPU Training...")
+    history = model.fit(
+        train_ds,
+        validation_data=test_ds,
+        epochs=40
+    )
+
+    os.makedirs("results", exist_ok=True)
+    model.save("results/extensive_cnn_model.h5")
+    print("\nModel saved to results/extensive_cnn_model.h5")
+
+# --------------------------------------------------------------
+if __name__ == "__main__":
+    main()
