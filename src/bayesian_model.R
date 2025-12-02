@@ -1,146 +1,163 @@
-# ==============================
-# Bayesian AD model in R (brms)
-# ==============================
-
-# ---- 0. Packages ----
-# install.packages(c("tidyverse", "brms"))  # run once
 library(tidyverse)
+library(caret)
 library(brms)
+library(pROC)
 
 options(mc.cores = parallel::detectCores())
-set.seed(42)
 
-# ---- 1. Load data ----
-# CHANGE THIS PATH to your actual CSV
-data_path <- "data/brain_features.csv"
+set.seed(123)
 
-df <- read_csv(data_path)
+data_path <- "/Users/shreyas/Desktop/BrainScanning/bayesiandata/cnn_probs_for_bayes.csv"
 
-# Expect a column "label" with 4 classes
+df <- readr::read_csv(data_path)
+
 df <- df %>%
   mutate(
-    label = factor(
-      label,
-      levels = c("No Impairment",
-                 "Very Mild Impairment",
-                 "Mild Impairment",
-                 "Moderate Impairment")
+    label_ord = factor(
+      true_label,
+      levels = c(
+        "No Impairment",
+        "Very Mild Impairment",
+        "Mild Impairment",
+        "Moderate Impairment"
+      ),
+      ordered = TRUE
     ),
-    # Binary version: AD vs No AD
     ad_binary = if_else(
-      label %in% c("Mild Impairment", "Moderate Impairment"),
+      true_label %in% c("Mild Impairment", "Moderate Impairment"),
       1L, 0L
     )
   )
 
-# ---- 2. Train / Test split ----
-set.seed(42)
-N <- nrow(df)
-train_idx <- sample(seq_len(N), size = floor(0.8 * N))
+
+
+train_idx <- createDataPartition(df$ad_binary, p = 0.8, list = FALSE)
 
 train <- df[train_idx, ]
 test  <- df[-train_idx, ]
 
 cat("Train rows:", nrow(train), " Test rows:", nrow(test), "\n")
 
-# ---- 3. Define predictors automatically ----
-# Use all numeric columns except the targets
-num_cols <- train %>%
-  select(where(is.numeric)) %>%
-  colnames()
-
-num_cols <- setdiff(num_cols, c("ad_binary"))  # drop target
-
-cat("Numeric predictors:\n")
-print(num_cols)
-
-# build formula: ad_binary ~ x1 + x2 + ...
-formula_str_bin <- paste("ad_binary ~", paste(num_cols, collapse = " + "))
-formula_bin <- bf(as.formula(formula_str_bin))
-
-# For ordinal 4-class outcome, treat label as ordered factor
-train <- train %>%
-  mutate(label_ord = ordered(label, levels = c(
-    "No Impairment",
-    "Very Mild Impairment",
-    "Mild Impairment",
-    "Moderate Impairment"
-  )))
-
-test <- test %>%
-  mutate(label_ord = ordered(label, levels = levels(train$label_ord)))
-
-formula_str_ord <- paste("label_ord ~", paste(num_cols, collapse = " + "))
-formula_ord <- bf(as.formula(formula_str_ord))
-
-# ---- 4. Priors ----
-priors_bin <- c(
-  prior(student_t(3, 0, 2.5), class = "Intercept"),
-  prior(normal(0, 1), class = "b")
+num_predictors <- c(
+  "p_mild_impairment",
+  "p_moderate_impairment",
+  "p_no_impairment",
+  "p_very_mild_impairment"
 )
 
-priors_ord <- c(
-  prior(student_t(3, 0, 5), class = "Intercept"),
-  prior(normal(0, 1), class = "b")
+cat("Numeric predictors used:\n")
+print(num_predictors)
+
+cat("\n==== Fitting Binary Logistic Model ====\n")
+
+binary_formula <- bf(
+  ad_binary ~ p_mild_impairment +
+    p_moderate_impairment +
+    p_no_impairment +
+    p_very_mild_impairment
 )
 
-# ---- 5. Fit Bayesian logistic (binary AD vs non-AD) ----
-fit_bin <- brm(
-  formula = formula_bin,
-  data    = train,
-  family  = bernoulli(link = "logit"),
-  prior   = priors_bin,
-  chains  = 4,
-  iter    = 2000,
-  warmup  = 1000,
-  seed    = 42
+binary_fit <- brm(
+  formula = binary_formula,
+  data = train,
+  family = bernoulli(link = "logit"),
+  chains = 4,
+  iter = 2000,
+  warmup = 1000,
+  seed = 123,
+  control = list(adapt_delta = 0.95)
 )
 
-print(summary(fit_bin))
-plot(fit_bin)
-pp_check(fit_bin)
+print(summary(binary_fit))
 
-# ---- 6. Evaluate binary model on test set ----
-bin_pred <- fitted(fit_bin, newdata = test, summary = TRUE)[, "Estimate"]
-test$bin_prob  <- bin_pred
-test$bin_pred  <- if_else(test$bin_prob > 0.5, 1L, 0L)
 
-bin_acc <- mean(test$bin_pred == test$ad_binary)
-cat("Binary Bayesian model test accuracy:", round(bin_acc, 3), "\n")
+pp_check(binary_fit, type = "dens_overlay")
 
-# ---- 7. Fit Bayesian ordinal model (4-stage AD) ----
-fit_ord <- brm(
-  formula = formula_ord,
-  data    = train,
-  family  = cumulative("logit"),
-  prior   = priors_ord,
-  chains  = 4,
-  iter    = 2000,
-  warmup  = 1000,
-  seed    = 42
+
+bin_epred <- posterior_epred(binary_fit, newdata = test)
+bin_prob_ad <- colMeans(bin_epred)
+
+
+test$binary_true_label <- factor(
+  if_else(test$ad_binary == 1L, "AD", "NoAD"),
+  levels = c("NoAD", "AD")
 )
 
-print(summary(fit_ord))
-plot(fit_ord)
-pp_check(fit_ord)
+test$binary_pred_label <- factor(
+  if_else(bin_prob_ad > 0.5, "AD", "NoAD"),
+  levels = c("NoAD", "AD")
+)
 
-# ---- 8. Evaluate ordinal model on test set ----
-# Get predicted class (MAP) on test
-ord_pred <- posterior_predict(fit_ord, newdata = test, summary = TRUE)
-# posterior_predict (summary=TRUE) returns most likely category index per row
-# map that back to factor levels:
-pred_idx <- as.integer(ord_pred)
+binary_cm <- confusionMatrix(
+  test$binary_pred_label,
+  test$binary_true_label
+)
+
+cat("\nBinary Bayesian model test accuracy:",
+    round(binary_cm$overall["Accuracy"], 3), "\n\n")
+
+cat("==== Additional Metrics ====\n")
+cat("Binary Model Confusion Matrix:\n")
+print(binary_cm)
+
+# AUC
+bin_roc <- roc(response = test$ad_binary, predictor = bin_prob_ad)
+cat("\nBinary Model AUC:", round(as.numeric(auc(bin_roc)), 3), "\n\n")
+
+
+
+cat("==== Fitting Ordinal Model ====\n")
+
+ordinal_formula <- bf(
+  label_ord ~ p_mild_impairment +
+    p_moderate_impairment +
+    p_no_impairment +
+    p_very_mild_impairment
+)
+
+ordinal_fit <- brm(
+  formula = ordinal_formula,
+  data = train,
+  family = cumulative(link = "logit"),
+  chains = 4,
+  iter = 2000,
+  warmup = 1000,
+  seed = 123,
+  control = list(adapt_delta = 0.95)
+)
+
+print(summary(ordinal_fit))
+
+
+pp_check(ordinal_fit, type = "dens_overlay")
+
+
+ord_pp <- posterior_predict(ordinal_fit, newdata = test)
+
+majority_vote <- function(x) {
+  tab <- table(x)
+  as.integer(names(which.max(tab)))
+}
+
+ord_idx <- apply(ord_pp, 2, majority_vote)
+
+ord_levels <- levels(train$label_ord)
+
 test$ord_pred_label <- factor(
-  levels(train$label_ord)[pred_idx],
-  levels = levels(train$label_ord)
+  ord_levels[ord_idx],
+  levels = ord_levels,
+  ordered = TRUE
 )
 
-ord_acc <- mean(test$ord_pred_label == test$label_ord)
-cat("Ordinal Bayesian model test accuracy:", round(ord_acc, 3), "\n")
+ordinal_cm <- confusionMatrix(
+  factor(test$ord_pred_label, ordered = FALSE),
+  factor(test$label_ord, ordered = FALSE)
+)
 
-# ---- 9. Save models ----
-dir.create("MLModels", showWarnings = FALSE)
-saveRDS(fit_bin, file = "MLModels/bayes_logistic_AD_vs_control.rds")
-saveRDS(fit_ord, file = "MLModels/bayes_ordinal_4class.rds")
+cat("Ordinal Bayesian model test accuracy:",
+    round(ordinal_cm$overall["Accuracy"], 3), "\n\n")
 
-cat("Saved models to MLModels/.\n")
+cat("Ordinal Model Confusion Matrix:\n")
+print(ordinal_cm)
+
+cat("\n==== Analysis Complete ====\n")
