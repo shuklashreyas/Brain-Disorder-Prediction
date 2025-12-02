@@ -1,0 +1,4 @@
+model,accuracy,precision,recall,f1
+CNN (per-class probs),0.5003909304143862,0.25039108324097514,0.5003909304143862,0.33376779100073706
+Binary (approx. Bayes - LR),0.8515625,0.0,0.0,0.0
+Binary Bayesian (from bayesian_results.json),0.8102,0.8388,0.9096,0.8728
