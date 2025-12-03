@@ -87,7 +87,7 @@ This script will:
 * Run a Gibbs sampler for Bayesian logistic regression
 * Output posterior results to `results/`
 
-### 4. Launch the Streamlit App (Extra Credit)
+### 4. Launch the Streamlit App
 ```bash
 streamlit run streamlit_app/app.py
 ```
