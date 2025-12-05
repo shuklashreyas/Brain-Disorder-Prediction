@@ -4,4 +4,6 @@ pillow
 matplotlib
 streamlit
 pandas
+scikit-learn
+seaborn
 
